@@ -1,0 +1,87 @@
+# ================== ИСТОЧНИКИ ==================
+sources:
+  nginx-access-input:
+    type: file
+    include:
+      - /var/log/nginx/*access.log
+    ignore_older_secs: 600 # игнорировать строки старше 10 минут
+    read_from: beginning   # начать чтение с начала файла
+
+  nginx-error-input:
+    type: file
+    include:
+      - /var/log/nginx/*error.log
+    ignore_older_secs: 600 # игнорировать строки старше 10 минут
+    read_from: beginning   # начать чтение с начала файла
+
+  mysql-input:
+    type: file
+    include:
+      - /var/log/mysql/*.log
+    ignore_older_secs: 600 # игнорировать строки старше 10 минут
+    read_from: beginning   # начать чтение с начала файла
+
+  php-fpm-input:
+    type: file
+    include:
+      - /var/log/php-fpm/*.log
+    ignore_older_secs: 600 # игнорировать строки старше 10 минут
+    read_from: beginning   # начать чтение с начала файла
+
+# ================== ПРЕОБРАЗОВАНИЯ ==================
+transforms:
+  parse_nginx_access_logs:
+    type: remap
+    inputs:
+      - nginx-access-input
+    source: |
+      . |= parse_regex!(.message, r'^(?P<remote_addr>\S+) \S+ \S+ \[(?P<time_local>[^\]]+)\] "(?P<request>[^"]+)" (?P<status>\d+) (?P<body_bytes_sent>\d+) "(?P<http_referer>[^"]*)" "(?P<http_user_agent>[^"]*)"$')
+
+      # Парсим дату
+      .timestamp = parse_timestamp(.time_local, "%d/%b/%Y:%H:%M:%S %z") ?? now()
+
+      del(.time_local)
+      del(.message)
+
+      # Разбираем request на метод, путь и протокол
+      request_parts = split(.request, " ")
+      if length(request_parts) == 3 {
+        .method = request_parts[0]
+        .path = request_parts[1]
+        .protocol = request_parts[2]
+      }
+      del(.request)
+
+# ================== ПРИЁМНИКИ ==================
+sinks:
+  elasticsearch-output:
+    type: elasticsearch
+    inputs:
+      - nginx-error-input
+      - mysql-input
+      - php-fpm-input
+      - parse_nginx_access_logs
+    endpoints:
+      - "https://192.168.66.155:9200"
+
+    bulk:
+      action: index
+      index: "logs-vector"
+    # Формат имени индекса: logs-vector-2025-04-05
+
+    # Аутентификация
+    auth:
+      strategy: basic
+      user: "elastic"
+      password: "jfxJHFq*pRq1+Z=fVKwc"
+
+    tls:
+      ca_file: "/etc/vector/certs/http_ca.crt"
+
+    # Настройки буферизации
+    batch:
+      max_bytes: 10485760   # Максимальный размер пакета: 10 MB
+      timeout_secs: 1       # Таймаут, чтобы не ждать слишком долго
+
+    buffer:
+      max_events: 1000      # Максимум событий в буфере
